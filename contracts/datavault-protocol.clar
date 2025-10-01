@@ -190,3 +190,113 @@
     (ok true)
   )
 )
+
+;; Deactivate an asset listing
+;; @desc: Removes an asset from active marketplace listings
+;; @param data-asset-id: ID of the asset to deactivate
+;; @returns: (response bool uint) - Success status
+(define-public (deactivate-asset-listing (data-asset-id uint))
+  (let ((asset-listing (unwrap! (map-get? data-asset-listings { data-asset-id: data-asset-id })
+      error-listing-not-found
+    )))
+    ;; Validation
+    (asserts! (< data-asset-id (var-get asset-id-counter)) error-invalid-input)
+    (asserts! (is-eq (get asset-owner asset-listing) tx-sender)
+      error-unauthorized-owner
+    )
+
+    ;; Deactivate listing
+    (map-set data-asset-listings { data-asset-id: data-asset-id }
+      (merge asset-listing { listing-active-status: false })
+    )
+    (ok true)
+  )
+)
+
+;; ============================================================================
+;; Public Functions - Transactions
+;; ============================================================================
+
+;; Purchase a data asset
+;; @desc: Executes the purchase of a data asset with automatic fee distribution
+;; @param data-asset-id: ID of the asset to purchase
+;; @returns: (response bool uint) - Transaction success status
+(define-public (purchase-data-asset (data-asset-id uint))
+  (let (
+      (asset-listing (unwrap! (map-get? data-asset-listings { data-asset-id: data-asset-id })
+        error-listing-not-found
+      ))
+      (purchase-price (get asset-price asset-listing))
+      (asset-seller (get asset-owner asset-listing))
+      (platform-fee-amount (calculate-marketplace-fee purchase-price))
+      (seller-payout-amount (- purchase-price platform-fee-amount))
+    )
+    ;; Validation
+    (asserts! (< data-asset-id (var-get asset-id-counter)) error-invalid-input)
+    (asserts! (get listing-active-status asset-listing) error-listing-not-found)
+    (asserts! (is-eq false (is-eq tx-sender asset-seller))
+      error-unauthorized-access
+    )
+
+    ;; Execute payments
+    (try! (process-stx-transfer tx-sender asset-seller seller-payout-amount))
+    (try! (process-stx-transfer tx-sender marketplace-owner platform-fee-amount))
+
+    ;; Record transaction
+    (map-set marketplace-transactions {
+      asset-buyer: tx-sender,
+      purchased-asset-id: data-asset-id,
+    } {
+      transaction-timestamp: stacks-block-height,
+      transaction-amount: purchase-price,
+      asset-seller: asset-seller,
+    })
+
+    ;; Update seller statistics
+    (let ((seller-profile (default-to {
+        user-total-sales: u0,
+        user-reputation-score: u0,
+        user-last-activity-timestamp: u0,
+      }
+        (map-get? marketplace-user-profiles { marketplace-user: asset-seller })
+      )))
+      (map-set marketplace-user-profiles { marketplace-user: asset-seller } {
+        user-total-sales: (+ (get user-total-sales seller-profile) u1),
+        user-reputation-score: (get user-reputation-score seller-profile),
+        user-last-activity-timestamp: stacks-block-height,
+      })
+    )
+
+    ;; Update global transaction counter
+    (var-set total-marketplace-transactions
+      (+ (var-get total-marketplace-transactions) u1)
+    )
+    (ok true)
+  )
+)
+
+;; Retrieve encrypted access credentials for purchased asset
+;; @desc: Returns the encrypted access key for a data asset (buyer only)
+;; @param data-asset-id: ID of the purchased asset
+;; @returns: (response (string-ascii 512) uint) - Encrypted access credentials
+(define-public (retrieve-asset-access-key (data-asset-id uint))
+  (let (
+      (purchase-record (unwrap!
+        (map-get? marketplace-transactions {
+          asset-buyer: tx-sender,
+          purchased-asset-id: data-asset-id,
+        })
+        error-unauthorized-access
+      ))
+      (access-credentials (unwrap!
+        (map-get? data-access-credentials { data-asset-id: data-asset-id })
+        error-listing-not-found
+      ))
+    )
+    ;; Validation
+    (asserts! (< data-asset-id (var-get asset-id-counter)) error-invalid-input)
+
+    ;; Return encrypted key
+    (ok (get encrypted-access-key access-credentials))
+  )
+)
