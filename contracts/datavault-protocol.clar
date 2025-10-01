@@ -97,3 +97,96 @@
     (<= (len key) u512)
   )
 )
+
+;; ============================================================================
+;; Private Helper Functions
+;; ============================================================================
+
+(define-private (calculate-marketplace-fee (asset-price uint))
+  (/ (* asset-price (var-get marketplace-fee-percentage)) u100)
+)
+
+(define-private (process-stx-transfer
+    (sender-address principal)
+    (recipient-address principal)
+    (transfer-amount uint)
+  )
+  (stx-transfer? transfer-amount sender-address recipient-address)
+)
+
+;; ============================================================================
+;; Public Functions - Asset Management
+;; ============================================================================
+
+;; Create a new data asset listing
+;; @desc: Lists a new encrypted data asset for sale on the marketplace
+;; @param asset-price: Price in microSTX for the data asset
+;; @param asset-description: Human-readable description of the dataset
+;; @param asset-category: Category classification for the asset
+;; @param encrypted-access-key: Encrypted credentials for accessing the data
+;; @returns: (response uint uint) - The new asset ID on success
+(define-public (create-data-asset-listing
+    (asset-price uint)
+    (asset-description (string-ascii 256))
+    (asset-category (string-ascii 64))
+    (encrypted-access-key (string-ascii 512))
+  )
+  (let ((new-asset-id (var-get asset-id-counter)))
+    ;; Input validation
+    (asserts! (> asset-price u0) error-invalid-asset-price)
+    (asserts! (is-valid-description asset-description) error-invalid-input)
+    (asserts! (is-valid-category asset-category) error-invalid-input)
+    (asserts! (is-valid-access-key encrypted-access-key) error-invalid-input)
+    (asserts!
+      (not (default-to false
+        (get listing-active-status
+          (map-get? data-asset-listings { data-asset-id: new-asset-id })
+        )))
+      error-asset-already-listed
+    )
+
+    ;; Create listing
+    (map-set data-asset-listings { data-asset-id: new-asset-id } {
+      asset-owner: tx-sender,
+      asset-price: asset-price,
+      asset-description: asset-description,
+      asset-category: asset-category,
+      listing-active-status: true,
+      listing-creation-timestamp: stacks-block-height,
+    })
+
+    ;; Store encrypted access credentials
+    (map-set data-access-credentials { data-asset-id: new-asset-id } { encrypted-access-key: encrypted-access-key })
+
+    ;; Increment counter
+    (var-set asset-id-counter (+ new-asset-id u1))
+    (ok new-asset-id)
+  )
+)
+
+;; Update the price of an existing asset listing
+;; @desc: Allows asset owner to modify the sale price
+;; @param data-asset-id: ID of the asset to update
+;; @param updated-price: New price in microSTX
+;; @returns: (response bool uint) - Success status
+(define-public (update-asset-price
+    (data-asset-id uint)
+    (updated-price uint)
+  )
+  (let ((asset-listing (unwrap! (map-get? data-asset-listings { data-asset-id: data-asset-id })
+      error-listing-not-found
+    )))
+    ;; Validation
+    (asserts! (< data-asset-id (var-get asset-id-counter)) error-invalid-input)
+    (asserts! (is-eq (get asset-owner asset-listing) tx-sender)
+      error-unauthorized-owner
+    )
+    (asserts! (> updated-price u0) error-invalid-asset-price)
+
+    ;; Update price
+    (map-set data-asset-listings { data-asset-id: data-asset-id }
+      (merge asset-listing { asset-price: updated-price })
+    )
+    (ok true)
+  )
+)
